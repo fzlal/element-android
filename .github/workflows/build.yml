@@ -5,7 +5,8 @@ on:
   push:
     branches: [ main, develop ]
 
-permissions: {}
+permissions:
+  contents: write  # برای commit کردن نیاز است
 
 # Enrich gradle.properties for CI/CD
 env:
@@ -21,20 +22,18 @@ jobs:
       fail-fast: false
       matrix:
         target: [ Gplay, Fdroid ]
-    # Allow all jobs on develop. Just one per PR.
     concurrency:
       group: ${{ github.ref == 'refs/heads/develop' && format('integration-tests-develop-{0}-{1}', matrix.target, github.sha) || format('build-debug-{0}-{1}', matrix.target, github.ref)  }}
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # https://github.com/actions/checkout/issues/881
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
+          persist-credentials: true  # برای commit نیاز است
       - name: Use JDK 21
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
-          distribution: 'temurin' # See 'Supported distributions' for available options
+          distribution: 'temurin'
           java-version: '21'
       - name: Configure gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
@@ -42,29 +41,41 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/develop' }}
       - name: Assemble ${{ matrix.target }} debug apk
         run: ./gradlew assemble${{ matrix.target }}Debug $CI_GRADLE_ARG_PROPERTIES
-      - name: Upload ${{ matrix.target }} debug APKs
+      - name: Copy APKs to source directory
+        run: |
+          mkdir -p ./built-apks/${{ matrix.target }}/debug/
+          cp -r vector-app/build/outputs/apk/*/debug/*.apk ./built-apks/${{ matrix.target }}/debug/
+      - name: Commit and push APKs to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ./built-apks/
+          git diff --staged --quiet || git commit -m "Build debug APKs for ${{ matrix.target }} [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
+      - name: Upload ${{ matrix.target }} debug APKs (artifact backup)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: vector-${{ matrix.target }}-debug
           path: |
-            vector-app/build/outputs/apk/*/debug/*.apk
+            ./built-apks/${{ matrix.target }}/debug/*.apk
 
   release:
     name: Build unsigned GPlay APKs
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     concurrency:
       group: ${{ github.ref == 'refs/head/main' && format('build-release-apk-main-{0}', github.sha) || github.ref == 'refs/heads/develop' && format('build-release-apk-develop-{0}', github.sha) || format('build-debug-{0}', github.ref)  }}
       cancel-in-progress: ${{ github.ref != 'refs/head/main' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # https://github.com/actions/checkout/issues/881
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.ref }}
-          persist-credentials: false
+          persist-credentials: true
       - name: Use JDK 21
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
-          distribution: 'temurin' # See 'Supported distributions' for available options
+          distribution: 'temurin'
           java-version: '21'
       - name: Configure gradle
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
@@ -72,16 +83,29 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/develop' }}
       - name: Assemble GPlay unsigned apk
         run: ./gradlew clean assembleGplayRelease $CI_GRADLE_ARG_PROPERTIES
-      - name: Upload Gplay unsigned APKs
+      - name: Copy APKs to source directory
+        run: |
+          mkdir -p ./built-apks/gplay/release/
+          cp -r vector-app/build/outputs/apk/*/release/*.apk ./built-apks/gplay/release/
+      - name: Commit and push APKs to branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ./built-apks/
+          git diff --staged --quiet || git commit -m "Build unsigned GPlay release APKs [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
+      - name: Upload Gplay unsigned APKs (artifact backup)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: vector-gplay-release-unsigned
           path: |
-            vector-app/build/outputs/apk/*/release/*.apk
+            ./built-apks/gplay/release/*.apk
 
   exodus:
     runs-on: ubuntu-latest
     needs: release
+    permissions:
+      contents: write
     steps:
       - name: Obtain apk from artifact
         id: download
@@ -95,9 +119,19 @@ jobs:
       - name: Execute exodus-standalone
         uses: docker://exodusprivacy/exodus-standalone:latest
         with:
-          # Don't fail when finding trackers so they can be reported later
           args: /github/workspace/gplay/release/vector-gplay-universal-release-unsigned.apk -j -o /github/workspace/exodus.json -e 0
-      - name: Upload exodus json report
+      - name: Copy exodus report to source
+        run: |
+          mkdir -p ./reports/
+          cp exodus.json ./reports/
+      - name: Commit and push exodus report
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ./reports/exodus.json
+          git diff --staged --quiet || git commit -m "Add Exodus privacy report [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
+      - name: Upload exodus json report (artifact backup)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: exodus.json
@@ -106,7 +140,6 @@ jobs:
       - name: Check for trackers
         env:
           SENTRY_ID: 447
-        # Should only contain a Sentry item
         run: |
           TRACKER_IDS=$(jq ".trackers[] | .id" exodus.json)
           [ $TRACKER_IDS = ${{ env.SENTRY_ID }} ] || { echo '::error static analysis identified user tracking library' ; exit 1; }

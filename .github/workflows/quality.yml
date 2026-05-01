@@ -79,11 +79,24 @@ jobs:
           ./gradlew vector-app:lintFdroidRelease $CI_GRADLE_ARG_PROPERTIES
       - name: Upload reports
         if: always()
+        run: |
+          mkdir -p ./reports/linting/
+          cp -r */build/reports/**/*.* ./reports/linting/ 2>/dev/null || true
+      - name: Commit reports to source
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ./reports/linting/
+          git diff --staged --quiet || git commit -m "Add linting reports [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
+      - name: Upload reports (artifact backup)
+        if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: linting-report
           path: |
-            */build/reports/**/*.*
+            ./reports/linting/
       - name: Prepare Danger
         if: always()
         run: |

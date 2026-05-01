@@ -1,12 +1,33 @@
 name: APK Build
 
+name: APK Build
+
 on:
+  workflow_dispatch:  # <-- این خط را اضافه کنید - دکمه Manual Run را ایجاد می‌کند
+    inputs:
+      target:
+        description: 'Target variant'
+        required: false
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - Gplay
+          - Fdroid
+      build_type:
+        description: 'Build type'
+        required: false
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
   pull_request: { }
   push:
     branches: [ main, develop ]
 
 permissions:
-  contents: write  # برای commit کردن نیاز است
+  contents: write
 
 # Enrich gradle.properties for CI/CD
 env:

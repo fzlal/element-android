@@ -1,25 +1,18 @@
 name: APK Build
 
 on:
-  workflow_dispatch:  # <-- این خط را اضافه کنید - دکمه Manual Run را ایجاد می‌کند
+  workflow_dispatch:
     inputs:
       target:
-        description: 'Target variant'
+        description: 'Target variant (Gplay/Fdroid/both)'
         required: false
         default: 'both'
-        type: choice
-        options:
-          - both
-          - Gplay
-          - Fdroid
+        type: string
       build_type:
-        description: 'Build type'
+        description: 'Build type (debug/release)'
         required: false
         default: 'debug'
-        type: choice
-        options:
-          - debug
-          - release
+        type: string
   pull_request: { }
   push:
     branches: [ main, develop ]
@@ -27,20 +20,21 @@ on:
 permissions:
   contents: write
 
-# Enrich gradle.properties for CI/CD
 env:
-  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx8g -Dfile.encoding=UTF-8 -XX:+HeapDumpOnOutOfMemoryError -XX:MaxMetaspaceSize=2g" -Dkotlin.daemon.jvm.options="-Xmx4g" -Dkotlin.incremental=false
+  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx6g -Dfile.encoding=UTF-8 -XX:+HeapDumpOnOutOfMemoryError -XX:MaxMetaspaceSize=2g" -Dkotlin.daemon.jvm.options="-Xmx4g" -Dkotlin.incremental=false
   CI_GRADLE_ARG_PROPERTIES: --stacktrace -PpreDexEnable=false --max-workers 2 --no-daemon
 
 jobs:
   debug:
     name: Build debug APKs (${{ matrix.target }})
     runs-on: ubuntu-latest
-    if: github.ref != 'refs/heads/main'
+    if: |
+      github.ref != 'refs/heads/main' && 
+      (github.event_name != 'workflow_dispatch' || github.event.inputs.build_type == 'debug' || github.event.inputs.build_type == 'both')
     strategy:
       fail-fast: false
       matrix:
-        target: [ Gplay, Fdroid ]
+        target: ${{ fromJson(github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'both' && '["Gplay", "Fdroid"]' || (github.event.inputs.target == 'Gplay' && '["Gplay"]' || '["Fdroid"]')) || '["Gplay", "Fdroid"]') }}
     concurrency:
       group: ${{ github.ref == 'refs/heads/develop' && format('integration-tests-develop-{0}-{1}', matrix.target, github.sha) || format('build-debug-{0}-{1}', matrix.target, github.ref)  }}
       cancel-in-progress: true
@@ -48,7 +42,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: true  # برای commit نیاز است
+          persist-credentials: true
       - name: Use JDK 21
         uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
         with:
@@ -58,29 +52,48 @@ jobs:
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/develop' }}
+      - name: Install required tools (rar, zip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rar unrar
       - name: Assemble ${{ matrix.target }} debug apk
         run: ./gradlew assemble${{ matrix.target }}Debug $CI_GRADLE_ARG_PROPERTIES
       - name: Copy APKs to source directory
         run: |
           mkdir -p ./built-apks/${{ matrix.target }}/debug/
           cp -r vector-app/build/outputs/apk/*/debug/*.apk ./built-apks/${{ matrix.target }}/debug/
-      - name: Commit and push APKs to branch
+      - name: Split APKs into multi-part RAR archives
+        run: |
+          cd ./built-apks/${{ matrix.target }}/debug/
+          # هر پارته 90 مگابایت (برای اطمینان از زیر 100 مگابایت)
+          for apk in *.apk; do
+            if [ -f "$apk" ]; then
+              echo "Splitting $apk into 90MB parts..."
+              rar a -v90m -m5 "${apk%.apk}.rar" "$apk"
+              rm "$apk"  # حذف فایل اصلی بعد از تبدیل
+            fi
+          done
+      - name: Commit and push RAR parts to branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ./built-apks/
-          git diff --staged --quiet || git commit -m "Build debug APKs for ${{ matrix.target }} [skip ci]"
+          git diff --staged --quiet || git commit -m "Build debug APKs for ${{ matrix.target }} (split into RAR parts) [skip ci]"
           git push origin HEAD:${{ github.ref_name }}
-      - name: Upload ${{ matrix.target }} debug APKs (artifact backup)
+      - name: Upload original APKs as artifact (backup)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: vector-${{ matrix.target }}-debug
+          name: vector-${{ matrix.target }}-debug-original
           path: |
-            ./built-apks/${{ matrix.target }}/debug/*.apk
+            vector-app/build/outputs/apk/*/debug/*.apk
 
   release:
     name: Build unsigned GPlay APKs
     runs-on: ubuntu-latest
+    if: |
+      github.event_name != 'workflow_dispatch' || 
+      github.event.inputs.build_type == 'release' || 
+      github.event.inputs.build_type == 'both'
     permissions:
       contents: write
     concurrency:
@@ -100,45 +113,60 @@ jobs:
         uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/develop' }}
+      - name: Install required tools (rar, zip)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rar unrar
       - name: Assemble GPlay unsigned apk
         run: ./gradlew clean assembleGplayRelease $CI_GRADLE_ARG_PROPERTIES
       - name: Copy APKs to source directory
         run: |
           mkdir -p ./built-apks/gplay/release/
           cp -r vector-app/build/outputs/apk/*/release/*.apk ./built-apks/gplay/release/
-      - name: Commit and push APKs to branch
+      - name: Split APKs into multi-part RAR archives
+        run: |
+          cd ./built-apks/gplay/release/
+          # هر پارته 90 مگابایت (زیر 100 مگابایت)
+          for apk in *.apk; do
+            if [ -f "$apk" ]; then
+              echo "Splitting $apk into 90MB parts..."
+              rar a -v90m -m5 "${apk%.apk}.rar" "$apk"
+              rm "$apk"  # حذف فایل اصلی بعد از تبدیل
+            fi
+          done
+      - name: Commit and push RAR parts to branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add ./built-apks/
-          git diff --staged --quiet || git commit -m "Build unsigned GPlay release APKs [skip ci]"
+          git diff --staged --quiet || git commit -m "Build unsigned GPlay release APKs (split into RAR parts) [skip ci]"
           git push origin HEAD:${{ github.ref_name }}
-      - name: Upload Gplay unsigned APKs (artifact backup)
+      - name: Upload original APKs as artifact (backup)
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: vector-gplay-release-unsigned
+          name: vector-gplay-release-unsigned-original
           path: |
-            ./built-apks/gplay/release/*.apk
+            vector-app/build/outputs/apk/*/release/*.apk
 
   exodus:
     runs-on: ubuntu-latest
     needs: release
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_type == 'release' || github.event.inputs.build_type == 'both'
     permissions:
       contents: write
     steps:
-      - name: Obtain apk from artifact
+      - name: Obtain original APK from artifact
         id: download
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
-          name: vector-gplay-release-unsigned
-      - name: Show apks in artifact
-        run: ls -R ${STEPS_DOWNLOAD_OUTPUTS_DOWNLOAD_PATH}
-        env:
-          STEPS_DOWNLOAD_OUTPUTS_DOWNLOAD_PATH: ${{steps.download.outputs.download-path}}
+          name: vector-gplay-release-unsigned-original
+          path: ./original-apk/
+      - name: Show files
+        run: ls -R ./
       - name: Execute exodus-standalone
         uses: docker://exodusprivacy/exodus-standalone:latest
         with:
-          args: /github/workspace/gplay/release/vector-gplay-universal-release-unsigned.apk -j -o /github/workspace/exodus.json -e 0
+          args: ./original-apk/vector-gplay-universal-release-unsigned.apk -j -o /github/workspace/exodus.json -e 0
       - name: Copy exodus report to source
         run: |
           mkdir -p ./reports/
@@ -150,7 +178,7 @@ jobs:
           git add ./reports/exodus.json
           git diff --staged --quiet || git commit -m "Add Exodus privacy report [skip ci]"
           git push origin HEAD:${{ github.ref_name }}
-      - name: Upload exodus json report (artifact backup)
+      - name: Upload exodus json report
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: exodus.json

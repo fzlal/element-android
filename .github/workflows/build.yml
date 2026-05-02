@@ -8,7 +8,6 @@ on:
         required: false
         default: 'both'
         type: string
-      # build_type رو کامل حذف کن
   pull_request: { }
   push:
     branches: [ main, develop ]
@@ -21,18 +20,14 @@ env:
   CI_GRADLE_ARG_PROPERTIES: --stacktrace -PpreDexEnable=false --max-workers 2 --no-daemon
 
 jobs:
-  # کل job دیباگ رو حذف کن
-
   release:
     name: Build unsigned GPlay APKs
     runs-on: ubuntu-latest
-    if: |
-      # شرط رو ساده‌تر کن - همیشه اجرا بشه
-      github.event_name != 'workflow_dispatch' || true
+    if: github.event_name != 'workflow_dispatch' || true
     permissions:
       contents: write
     concurrency:
-      group: ${{ github.ref == 'refs/head/main' && format('build-release-apk-main-{0}', github.sha) || github.ref == 'refs/heads/develop' && format('build-release-apk-develop-{0}', github.sha) || format('build-debug-{0}', github.ref)  }}
+      group: ${{ github.ref == 'refs/head/main' && format('build-release-apk-main-{0}', github.sha) || github.ref == 'refs/heads/develop' && format('build-release-apk-develop-{0}', github.sha) || format('build-debug-{0}', github.ref) }}
       cancel-in-progress: ${{ github.ref != 'refs/head/main' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2

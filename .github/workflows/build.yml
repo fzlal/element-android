@@ -115,7 +115,6 @@ jobs:
           cache-read-only: ${{ github.ref != 'refs/heads/develop' }}
       - name: Install required tools (rar, zip)
         run: |
-          sudo apt-get update
           sudo apt-get install -y rar unrar
       - name: Assemble GPlay unsigned apk
         run: ./gradlew clean assembleGplayRelease $CI_GRADLE_ARG_PROPERTIES
